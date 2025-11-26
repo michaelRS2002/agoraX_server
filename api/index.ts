@@ -12,53 +12,53 @@ const io = new Server({
   },
 });
 
+// Usuarios globales (no por sala)
 let onlineUsers: { socketId: string; userId: string }[] = [];
 
-io.on("connection", (socket: Socket) => {
-  // Agregar usuario con socketId
-  onlineUsers.push({ socketId: socket.id, userId: "" });
-  io.emit("userOnline", onlineUsers);
+// Usuarios por sala
+const rooms: Record<string, { socketId: string; username: string }[]> = {};
 
-  console.log(
-    "A user connected with id:",
-    socket.id,
-    "there are now",
-    onlineUsers.length,
-    "online users"
-  );
+io.on("connection", (socket: Socket) => {
+  console.log("User connected:", socket.id);
+
+  // Agregamos usuario global
+  onlineUsers.push({ socketId: socket.id, userId: "" });
+  io.emit("usersOnline", onlineUsers);
 
   // ──────────────────────────────
-  // 🔵 Manejamos la identificación del usuario
+  // 🔵 Identificar usuario global
   // ──────────────────────────────
   socket.on("newUser", (userId: string) => {
     if (!userId) return;
 
-    const existingUserIndex = onlineUsers.findIndex(
-      (user) => user.socketId === socket.id
-    );
+    const index = onlineUsers.findIndex(u => u.socketId === socket.id);
 
-    if (existingUserIndex !== -1) {
-      onlineUsers[existingUserIndex] = { socketId: socket.id, userId };
-    } else if (!onlineUsers.some((user) => user.userId === userId)) {
-      onlineUsers.push({ socketId: socket.id, userId });
+    if (index !== -1) {
+      onlineUsers[index].userId = userId;
     } else {
-      onlineUsers = onlineUsers.map((user) =>
-        user.userId === userId ? { socketId: socket.id, userId } : user
-      );
+      onlineUsers.push({ socketId: socket.id, userId });
     }
 
     io.emit("usersOnline", onlineUsers);
   });
 
   // ──────────────────────────────
-  // 🔵 JOIN ROOM
+  // 🔵 JOIN ROOM (recibe username)
   // ──────────────────────────────
-  socket.on("joinRoom", (roomId: string) => {
+  socket.on("joinRoom", ({ roomId, username }) => {
     socket.join(roomId);
-    console.log(`Socket ${socket.id} joined room ${roomId}`);
+    socket.data.username = username;
 
-    // notificar a otros en la sala
-    socket.to(roomId).emit("userJoined", { socketId: socket.id });
+    if (!rooms[roomId]) rooms[roomId] = [];
+
+    rooms[roomId].push({
+      socketId: socket.id,
+      username,
+    });
+
+    console.log(`User ${username} joined room ${roomId}`);
+
+    io.to(roomId).emit("roomUsers", rooms[roomId]);
   });
 
   // ──────────────────────────────
@@ -66,21 +66,23 @@ io.on("connection", (socket: Socket) => {
   // ──────────────────────────────
   socket.on("leaveRoom", (roomId: string) => {
     socket.leave(roomId);
-    console.log(`Socket ${socket.id} left room ${roomId}`);
 
-    socket.to(roomId).emit("userLeft", { socketId: socket.id });
+    if (rooms[roomId]) {
+      rooms[roomId] = rooms[roomId].filter(u => u.socketId !== socket.id);
+      io.to(roomId).emit("roomUsers", rooms[roomId]);
+    }
+
+    console.log(`User left room ${roomId}`);
   });
 
   // ──────────────────────────────
-  // 🔵 MENSAJES DENTRO DE UNA SALA
+  // 🔵 MENSAJES
   // ──────────────────────────────
-  socket.on("sendMessage", (data: { roomId: string; user: string; text: string }) => {
-    console.log("Message received in room:", data);
-
-    io.to(data.roomId).emit("message", {
+  socket.on("sendMessage", ({ roomId, user, text }) => {
+    io.to(roomId).emit("message", {
       id: crypto.randomUUID(),
-      user: data.user,
-      text: data.text,
+      user,
+      text,
       timestamp: new Date(),
     });
   });
@@ -89,19 +91,21 @@ io.on("connection", (socket: Socket) => {
   // 🔴 DESCONEXIÓN
   // ──────────────────────────────
   socket.on("disconnect", () => {
-    onlineUsers = onlineUsers.filter((user) => user.socketId !== socket.id);
-    io.emit("usersOnline", onlineUsers);
+    console.log("User disconnected:", socket.id);
 
-    console.log(
-      "A user disconnected with id:",
-      socket.id,
-      "there are now",
-      onlineUsers.length,
-      "online users"
-    );
+    // eliminar usuario de todas las rooms
+    for (const roomId in rooms) {
+      rooms[roomId] = rooms[roomId].filter(u => u.socketId !== socket.id);
+      io.to(roomId).emit("roomUsers", rooms[roomId]);
+    }
+
+    // eliminar usuario global
+    onlineUsers = onlineUsers.filter(u => u.socketId !== socket.id);
+    io.emit("usersOnline", onlineUsers);
   });
 });
 
 const port = Number(process.env.PORT);
 io.listen(port);
 console.log(`Server running on port ${port}`);
+
